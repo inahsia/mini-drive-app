@@ -408,10 +408,45 @@ const HomeScreen = ({ navigation }) => {
     return imageExtensions.includes(ext);
   };
 
+  const handleFilePress = (item) => {
+    Alert.alert(
+      item.original_name,
+      'What would you like to do with this file?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'View/Download', onPress: () => handleViewFile(item) },
+        { text: 'Replace', onPress: () => handleEdit(item.id, item.original_name) },
+        { text: 'Delete', style: 'destructive', onPress: () => handleDelete(item.id, item.original_name) },
+      ]
+    );
+  };
+
+  const handleViewFile = async (item) => {
+    try {
+      const fileUrl = __DEV__ 
+        ? `http://10.0.2.2:8000${item.file}`
+        : `https://mini-drive-app.onrender.com${item.file}`;
+      
+      const supported = await Linking.canOpenURL(fileUrl);
+      if (supported) {
+        await Linking.openURL(fileUrl);
+      } else {
+        Alert.alert('Error', 'Cannot open this file type');
+      }
+    } catch (error) {
+      console.error('Error opening file:', error);
+      Alert.alert('Error', 'Failed to open file');
+    }
+  };
+
   const renderFile = ({item}) => (
-    <View style={styles.fileItem}>
+    <TouchableOpacity style={styles.fileItem} onPress={() => handleFilePress(item)}>
       <Image 
-        source={{uri: `http://10.0.2.2:8000${item.file}`}} 
+        source={{
+          uri: __DEV__ 
+            ? `http://10.0.2.2:8000${item.file}`
+            : `https://mini-drive-app.onrender.com${item.file}`
+        }} 
         style={styles.fileImage} 
       />
       <View style={styles.fileInfo}>
@@ -424,18 +459,24 @@ const HomeScreen = ({ navigation }) => {
       <View style={styles.fileActions}>
         <TouchableOpacity 
           style={[styles.actionButton, styles.editButton]}
-          onPress={() => handleEdit(item.id, item.original_name)}
+          onPress={(e) => {
+            e.stopPropagation();
+            handleEdit(item.id, item.original_name);
+          }}
         >
           <Text style={styles.actionButtonText}>✏️</Text>
         </TouchableOpacity>
         <TouchableOpacity 
           style={[styles.actionButton, styles.deleteButton]}
-          onPress={() => handleDelete(item.id, item.original_name)}
+          onPress={(e) => {
+            e.stopPropagation();
+            handleDelete(item.id, item.original_name);
+          }}
         >
           <Text style={styles.actionButtonText}>🗑️</Text>
         </TouchableOpacity>
       </View>
-    </View>
+    </TouchableOpacity>
   );
 
   return (
@@ -537,6 +578,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 3,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
   },
   fileImage: {
     width: 50,
