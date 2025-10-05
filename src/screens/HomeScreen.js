@@ -11,7 +11,9 @@ import {
   Linking,
   Dimensions,
   PermissionsAndroid,
-  Platform
+  Platform,
+  Modal,
+  ScrollView
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { launchImageLibrary, launchCamera, MediaType } from 'react-native-image-picker';
@@ -24,6 +26,8 @@ const HomeScreen = ({ navigation }) => {
   const [files, setFiles] = useState([]);
   const [userStats, setUserStats] = useState({});
   const [isAdmin, setIsAdmin] = useState(false);
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [imageViewerVisible, setImageViewerVisible] = useState(false);
 
   const requestCameraPermission = async () => {
     if (Platform.OS === 'android') {
@@ -421,21 +425,27 @@ const HomeScreen = ({ navigation }) => {
     );
   };
 
-  const handleViewFile = async (item) => {
-    try {
-      const fileUrl = __DEV__ 
-        ? `http://10.0.2.2:8000${item.file}`
-        : `https://mini-drive-app.onrender.com${item.file}`;
-      
-      const supported = await Linking.canOpenURL(fileUrl);
-      if (supported) {
-        await Linking.openURL(fileUrl);
-      } else {
+  const handleViewFile = (item) => {
+    const fileUrl = __DEV__ 
+      ? `http://10.0.2.2:8000${item.file}`
+      : `https://mini-drive-app.onrender.com${item.file}`;
+    
+    // Check if it's an image file
+    const isImage = item.file.toLowerCase().match(/\.(jpg|jpeg|png|gif|bmp|webp)$/);
+    
+    if (isImage) {
+      // Show in modal for images
+      setSelectedImage({
+        ...item,
+        url: fileUrl
+      });
+      setImageViewerVisible(true);
+    } else {
+      // Try to open externally for other files
+      Linking.openURL(fileUrl).catch((error) => {
+        console.error('Error opening file:', error);
         Alert.alert('Error', 'Cannot open this file type');
-      }
-    } catch (error) {
-      console.error('Error opening file:', error);
-      Alert.alert('Error', 'Failed to open file');
+      });
     }
   };
 
@@ -519,6 +529,55 @@ const HomeScreen = ({ navigation }) => {
       />
       
       <Button title="Logout" onPress={handleLogout} color="#ff6b6b" />
+
+      {/* Image Viewer Modal */}
+      <Modal
+        visible={imageViewerVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setImageViewerVisible(false)}
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {selectedImage?.original_name || 'Image'}
+              </Text>
+              <TouchableOpacity
+                style={styles.closeButton}
+                onPress={() => setImageViewerVisible(false)}
+              >
+                <Text style={styles.closeButtonText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            
+            {selectedImage && (
+              <ScrollView 
+                style={styles.imageScrollView}
+                maximumZoomScale={3}
+                minimumZoomScale={1}
+                showsVerticalScrollIndicator={false}
+                showsHorizontalScrollIndicator={false}
+              >
+                <Image
+                  source={{ uri: selectedImage.url }}
+                  style={styles.fullImage}
+                  resizeMode="contain"
+                />
+              </ScrollView>
+            )}
+            
+            <View style={styles.modalFooter}>
+              <Text style={styles.imageInfo}>
+                Size: {((selectedImage?.file_size || 0) / 1024).toFixed(1)} KB
+              </Text>
+              <Text style={styles.imageInfo}>
+                Uploaded: {selectedImage?.uploaded_at ? new Date(selectedImage.uploaded_at).toLocaleDateString() : 'Unknown'}
+              </Text>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -640,6 +699,68 @@ const styles = StyleSheet.create({
   emptySubText: {
     fontSize: 14,
     color: '#999',
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    width: '95%',
+    height: '90%',
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 15,
+    backgroundColor: '#f8f9fa',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+    flex: 1,
+  },
+  closeButton: {
+    width: 30,
+    height: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#ff4444',
+    borderRadius: 15,
+  },
+  closeButtonText: {
+    fontSize: 16,
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  imageScrollView: {
+    flex: 1,
+  },
+  fullImage: {
+    width: width * 0.9,
+    height: width * 0.9,
+    alignSelf: 'center',
+    marginVertical: 20,
+  },
+  modalFooter: {
+    padding: 15,
+    backgroundColor: '#f8f9fa',
+    borderTopWidth: 1,
+    borderTopColor: '#e0e0e0',
+  },
+  imageInfo: {
+    fontSize: 12,
+    color: '#666',
+    textAlign: 'center',
+    marginBottom: 2,
   },
 });
 
