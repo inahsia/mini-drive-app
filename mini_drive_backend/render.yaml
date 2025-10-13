@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: mini-drive-backend
+    env: python
+    buildCommand: "chmod +x build.sh && ./build.sh"
+    startCommand: "gunicorn mini_drive_backend.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.5
+      - key: DJANGO_SETTINGS_MODULE
+        value: mini_drive_backend.production_settings
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: "*.onrender.com"
