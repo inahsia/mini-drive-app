@@ -2,7 +2,9 @@ import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const API = axios.create({
-  baseURL: 'http://10.0.2.2:8000/api/', // Android emulator
+  baseURL: __DEV__ 
+    ? 'http://10.0.2.2:8000/api/' // Android emulator for development
+    : 'https://mini-drive-app.onrender.com/api/', // Production URL
   timeout: 10000, // 10 second timeout
   headers: {
     'Content-Type': 'application/json',

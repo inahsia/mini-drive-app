@@ -1,4 +1,6 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# 📱 Mini Drive - Modern File Management App
+
+A beautiful and modern React Native file management application with Django REST API backend, featuring clean UI design, WhatsApp-style sharing, and professional authentication system.
 
 # Getting Started
 

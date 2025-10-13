@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { 
   View, 
   Text, 
-  Button, 
   FlatList, 
   StyleSheet, 
   Alert, 
@@ -13,14 +12,16 @@ import {
   PermissionsAndroid,
   Platform,
   Modal,
-  ScrollView
+  ScrollView,
+  Share,
+  StatusBar
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { launchImageLibrary, launchCamera, MediaType } from 'react-native-image-picker';
 import API from '../api/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-const { width } = Dimensions.get('window');
+import RNFS from 'react-native-fs';
+import { encryptFileData, decryptFileData } from '../utils/encryption';
 
 const HomeScreen = ({ navigation }) => {
   const [files, setFiles] = useState([]);
@@ -28,6 +29,72 @@ const HomeScreen = ({ navigation }) => {
   const [isAdmin, setIsAdmin] = useState(false);
   const [selectedImage, setSelectedImage] = useState(null);
   const [imageViewerVisible, setImageViewerVisible] = useState(false);
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [encryptionEnabled, setEncryptionEnabled] = useState(false);
+
+  // Simplified authenticated image component - direct approach
+  const AuthenticatedImage = ({ source, style, ...props }) => {
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(false);
+
+    // For now, let's try the direct approach with token in URL
+    const getAuthenticatedUrl = async () => {
+      try {
+        const token = await AsyncStorage.getItem('token');
+        if (token && source?.uri) {
+          // Add token as query parameter for testing
+          const separator = source.uri.includes('?') ? '&' : '?';
+          return `${source.uri}${separator}token=${token}`;
+        }
+        return source?.uri;
+      } catch (error) {
+        console.log('Error getting token:', error);
+        return source?.uri;
+      }
+    };
+
+    const [authenticatedUri, setAuthenticatedUri] = useState(null);
+
+    useEffect(() => {
+      const setupUri = async () => {
+        const uri = await getAuthenticatedUrl();
+        setAuthenticatedUri(uri);
+        console.log('Using authenticated URI:', uri);
+      };
+      setupUri();
+    }, [source?.uri]);
+
+    if (!authenticatedUri) {
+      return (
+        <View style={[style, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#f0f0f0' }]}>
+          <Text style={{ color: '#666' }}>Loading...</Text>
+        </View>
+      );
+    }
+
+    return (
+      <Image
+        source={{ uri: authenticatedUri }}
+        style={style}
+        onLoad={() => {
+          setLoading(false);
+          setError(false);
+          console.log('Image loaded successfully');
+        }}
+        onError={(err) => {
+          setLoading(false);
+          setError(true);
+          console.log('Image loading error:', err);
+        }}
+        onLoadStart={() => {
+          setLoading(true);
+          console.log('Image loading started');
+        }}
+        {...props}
+      />
+    );
+  };
 
   const requestCameraPermission = async () => {
     if (Platform.OS === 'android') {
@@ -53,7 +120,10 @@ const HomeScreen = ({ navigation }) => {
 
   const fetchFiles = async () => {
     try {
-      const response = await API.get('files/');
+      // Add cache buster to force fresh data
+      const cacheBuster = Date.now();
+      const response = await API.get(`files/?t=${cacheBuster}`);
+      console.log('Fetched files:', response.data.length, 'files');
       setFiles(response.data);
     } catch (error) {
       console.error(error);
@@ -256,17 +326,7 @@ const HomeScreen = ({ navigation }) => {
     );
   };
 
-  const handleReplaceFile = (fileId, fileName) => {
-    Alert.alert(
-      'Replace File',
-      `Replace "${fileName}" with a new file?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Camera', onPress: () => openCameraForReplace(fileId) },
-        { text: 'Gallery', onPress: () => openGalleryForReplace(fileId) },
-      ]
-    );
-  };
+
 
   const openCameraForReplace = async (fileId) => {
     // Check camera permission first
@@ -349,15 +409,21 @@ const HomeScreen = ({ navigation }) => {
 
       console.log('Replacing file:', fileId, newFile.fileName);
 
-      await API.put(`files/${fileId}/`, formData, {
+      const response = await API.put(`files/${fileId}/replace/`, formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
       });
 
+      console.log('Replace response:', response.data);
+      
       Alert.alert('Success', 'File replaced successfully!');
-      fetchFiles();
-      fetchUserStats();
+      
+      // Force refresh after a small delay to ensure backend has processed
+      setTimeout(() => {
+        fetchFiles();
+        fetchUserStats();
+      }, 500);
     } catch (error) {
       console.error('Replace error:', error);
       Alert.alert('Replace Failed', 'Could not replace file. Please try again.');
@@ -366,13 +432,116 @@ const HomeScreen = ({ navigation }) => {
 
   const handleEdit = (fileId, fileName) => {
     Alert.alert(
-      'Edit File',
-      `What would you like to do with "${fileName}"?`,
+      'Replace File',
+      `Replace "${fileName}" with a new file?`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Replace File', onPress: () => handleReplaceFile(fileId, fileName) },
+        { text: 'Camera', onPress: () => openCameraForReplace(fileId) },
+        { text: 'Gallery', onPress: () => openGalleryForReplace(fileId) },
       ]
     );
+  };
+
+  const handleShareFile = async (item) => {
+    try {
+      Alert.alert(
+        'Download and Share',
+        `This will download "${item.original_name}" to your device and open the share menu.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Download & Share', onPress: () => downloadAndShareFile(item) },
+        ]
+      );
+    } catch (error) {
+      console.error('Share error:', error);
+      Alert.alert('Share Failed', 'Could not share file. Please try again.');
+    }
+  };
+
+  const downloadAndShareFile = async (item) => {
+    try {
+      // Request storage permission for Android
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+          {
+            title: 'Storage Permission',
+            message: 'Mini Drive needs storage permission to download files',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          },
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          Alert.alert('Permission Denied', 'Storage permission is required to download files');
+          return;
+        }
+      }
+
+      // Show loading
+      Alert.alert('Downloading...', 'Please wait while we download your file.');
+
+      const token = await AsyncStorage.getItem('token');
+      const fileUrl = __DEV__ 
+        ? `http://10.0.2.2:8000/api/files/${item.id}/serve/?token=${token}`
+        : `https://mini-drive-app.onrender.com/api/files/${item.id}/serve/?token=${token}`;
+
+      // Create downloads directory path
+      const downloadDir = RNFS.DownloadDirectoryPath;
+      const fileName = item.original_name;
+      const filePath = `${downloadDir}/MiniDrive_${fileName}`;
+
+      console.log('Downloading file to:', filePath);
+
+      // Download the file
+      const downloadResult = await RNFS.downloadFile({
+        fromUrl: fileUrl,
+        toFile: filePath,
+        headers: {
+          'Authorization': `Token ${token}`,
+        },
+      }).promise;
+
+      console.log('Download result:', downloadResult);
+
+      if (downloadResult.statusCode === 200) {
+        // File downloaded successfully, now share it
+        const shareOptions = {
+          title: 'Share File from Mini Drive',
+          message: `Sharing: ${item.original_name}`,
+          url: `file://${filePath}`,
+        };
+
+        await Share.share(shareOptions);
+
+        Alert.alert(
+          'Success!', 
+          `File downloaded and shared successfully!\n\nSaved to: Downloads/MiniDrive_${fileName}`,
+          [{ text: 'OK' }]
+        );
+      } else {
+        throw new Error('Download failed');
+      }
+    } catch (error) {
+      console.error('Download and share error:', error);
+      Alert.alert('Download Failed', 'Could not download file for sharing. Please try again.');
+    }
+  };
+
+
+
+  const handleShareViewOnly = async (item) => {
+    try {
+      const shareOptions = {
+        title: 'Share File Link - View Only',
+        message: `View this file from Mini Drive: ${item.original_name}\n\nNote: This is a view-only link from Mini Drive app.`,
+      };
+
+      await Share.share(shareOptions);
+    } catch (error) {
+      console.error('Share view only error:', error);
+      Alert.alert('Share Failed', 'Could not share file link. Please try again.');
+    }
   };
 
   const renameFile = (fileId, currentName) => {
@@ -413,49 +582,49 @@ const HomeScreen = ({ navigation }) => {
   };
 
   const handleFilePress = (item) => {
-    Alert.alert(
-      item.original_name,
-      'What would you like to do with this file?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'View/Download', onPress: () => handleViewFile(item) },
-        { text: 'Replace', onPress: () => handleEdit(item.id, item.original_name) },
-        { text: 'Delete', style: 'destructive', onPress: () => handleDelete(item.id, item.original_name) },
-      ]
-    );
+    setSelectedFile(item);
+    setMenuVisible(true);
   };
 
-  const handleViewFile = (item) => {
-    const fileUrl = __DEV__ 
-      ? `http://10.0.2.2:8000${item.file}`
-      : `https://mini-drive-app.onrender.com${item.file}`;
-    
-    // Check if it's an image file
-    const isImage = item.file.toLowerCase().match(/\.(jpg|jpeg|png|gif|bmp|webp)$/);
-    
-    if (isImage) {
-      // Show in modal for images
-      setSelectedImage({
-        ...item,
-        url: fileUrl
-      });
-      setImageViewerVisible(true);
-    } else {
-      // Try to open externally for other files
-      Linking.openURL(fileUrl).catch((error) => {
-        console.error('Error opening file:', error);
-        Alert.alert('Error', 'Cannot open this file type');
-      });
+  const handleViewFile = async (item) => {
+    try {
+      // Use authenticated API endpoint to serve files
+      const fileUrl = __DEV__ 
+        ? `http://10.0.2.2:8000/api/files/${item.id}/serve/`
+        : `https://mini-drive-app.onrender.com/api/files/${item.id}/serve/`;
+      
+      console.log('File URL:', fileUrl);
+      
+      // Check if it's an image file
+      const isImage = item.file.toLowerCase().match(/\.(jpg|jpeg|png|gif|bmp|webp)$/);
+      
+      if (isImage) {
+        // Show in modal for images
+        setSelectedImage({
+          ...item,
+          url: fileUrl
+        });
+        setImageViewerVisible(true);
+      } else {
+        // Try to open externally for other files
+        Linking.openURL(fileUrl).catch((error) => {
+          console.error('Error opening file:', error);
+          Alert.alert('Error', 'Cannot open this file type');
+        });
+      }
+    } catch (error) {
+      console.error('Error in handleViewFile:', error);
+      Alert.alert('Error', 'Failed to open file');
     }
   };
 
   const renderFile = ({item}) => (
-    <TouchableOpacity style={styles.fileItem} onPress={() => handleFilePress(item)}>
-      <Image 
+    <TouchableOpacity style={styles.fileItem} onPress={() => handleViewFile(item)}>
+      <AuthenticatedImage 
         source={{
           uri: __DEV__ 
-            ? `http://10.0.2.2:8000${item.file}`
-            : `https://mini-drive-app.onrender.com${item.file}`
+            ? `http://10.0.2.2:8000/api/files/${item.id}/serve/?v=${item.uploaded_at}`
+            : `https://mini-drive-app.onrender.com/api/files/${item.id}/serve/?v=${item.uploaded_at}`
         }} 
         style={styles.fileImage} 
       />
@@ -468,22 +637,17 @@ const HomeScreen = ({ navigation }) => {
       </View>
       <View style={styles.fileActions}>
         <TouchableOpacity 
-          style={[styles.actionButton, styles.editButton]}
+          style={styles.dropdownButton}
           onPress={(e) => {
             e.stopPropagation();
-            handleEdit(item.id, item.original_name);
+            handleFilePress(item);
           }}
         >
-          <Text style={styles.actionButtonText}>✏️</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.actionButton, styles.deleteButton]}
-          onPress={(e) => {
-            e.stopPropagation();
-            handleDelete(item.id, item.original_name);
-          }}
-        >
-          <Text style={styles.actionButtonText}>🗑️</Text>
+          <View style={styles.dotsContainer}>
+            <View style={styles.dot} />
+            <View style={styles.dot} />
+            <View style={styles.dot} />
+          </View>
         </TouchableOpacity>
       </View>
     </TouchableOpacity>
@@ -491,6 +655,7 @@ const HomeScreen = ({ navigation }) => {
 
   return (
     <View style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
       <View style={styles.header}>
         <Text style={styles.title}>My Files</Text>
         {isAdmin && (
@@ -512,7 +677,12 @@ const HomeScreen = ({ navigation }) => {
         )}
       </View>
 
-      <Button title="Upload Image/Photo" onPress={handleUpload} />
+      <TouchableOpacity style={styles.uploadButton} onPress={handleUpload}>
+        <View style={styles.uploadIcon}>
+          <Text style={styles.uploadIconText}>+</Text>
+        </View>
+        <Text style={styles.uploadButtonText}>Upload File</Text>
+      </TouchableOpacity>
       
       <FlatList
         data={files}
@@ -520,6 +690,7 @@ const HomeScreen = ({ navigation }) => {
         renderItem={renderFile}
         style={styles.fileList}
         showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.fileListContent}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyText}>No files uploaded yet</Text>
@@ -528,7 +699,9 @@ const HomeScreen = ({ navigation }) => {
         }
       />
       
-      <Button title="Logout" onPress={handleLogout} color="#ff6b6b" />
+      <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+        <Text style={styles.logoutButtonText}>Logout</Text>
+      </TouchableOpacity>
 
       {/* Image Viewer Modal */}
       <Modal
@@ -547,7 +720,7 @@ const HomeScreen = ({ navigation }) => {
                 style={styles.closeButton}
                 onPress={() => setImageViewerVisible(false)}
               >
-                <Text style={styles.closeButtonText}>✕</Text>
+                <Text style={styles.closeButtonText}>×</Text>
               </TouchableOpacity>
             </View>
             
@@ -559,11 +732,20 @@ const HomeScreen = ({ navigation }) => {
                 showsVerticalScrollIndicator={false}
                 showsHorizontalScrollIndicator={false}
               >
-                <Image
+                <AuthenticatedImage
                   source={{ uri: selectedImage.url }}
                   style={styles.fullImage}
                   resizeMode="contain"
+                  onLoad={() => console.log('Image loaded successfully:', selectedImage.url)}
+                  onError={(error) => {
+                    console.log('Image loading error:', error);
+                    console.log('Image URL:', selectedImage.url);
+                  }}
+                  onLoadStart={() => console.log('Image loading started:', selectedImage.url)}
                 />
+                <Text style={styles.debugText}>
+                  URL: {selectedImage.url}
+                </Text>
               </ScrollView>
             )}
             
@@ -578,6 +760,80 @@ const HomeScreen = ({ navigation }) => {
           </View>
         </View>
       </Modal>
+
+      {/* File Options Menu Modal */}
+      <Modal
+        visible={menuVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setMenuVisible(false)}
+      >
+        <View style={styles.menuOverlay}>
+          <View style={styles.menuContainer}>
+            <View style={styles.menuHeader}>
+              <Text style={styles.menuTitle}>{selectedFile?.original_name}</Text>
+              <Text style={styles.menuSubtitle}>Choose an action</Text>
+            </View>
+            
+            <TouchableOpacity 
+              style={styles.menuOption}
+              onPress={() => {
+                setMenuVisible(false);
+                handleViewFile(selectedFile);
+              }}
+            >
+              <Text style={styles.menuOptionText}>View</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.menuOption}
+              onPress={() => {
+                setMenuVisible(false);
+                handleShareViewOnly(selectedFile);
+              }}
+            >
+              <Text style={styles.menuOptionText}>Share Link</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.menuOption}
+              onPress={() => {
+                setMenuVisible(false);
+                handleShareFile(selectedFile);
+              }}
+            >
+              <Text style={styles.menuOptionText}>Share File</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.menuOption}
+              onPress={() => {
+                setMenuVisible(false);
+                handleEdit(selectedFile?.id, selectedFile?.original_name);
+              }}
+            >
+              <Text style={styles.menuOptionText}>Replace</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[styles.menuOption, styles.deleteOption]}
+              onPress={() => {
+                setMenuVisible(false);
+                handleDelete(selectedFile?.id, selectedFile?.original_name);
+              }}
+            >
+              <Text style={[styles.menuOptionText, styles.deleteText]}>Delete</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[styles.menuOption, styles.cancelOption]}
+              onPress={() => setMenuVisible(false)}
+            >
+              <Text style={styles.menuOptionText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -585,66 +841,141 @@ const HomeScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 20,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#f8f9fa',
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  adminButton: {
-    backgroundColor: '#4CAF50',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 5,
-  },
-  adminButtonText: {
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  statsContainer: {
-    backgroundColor: '#e3f2fd',
-    padding: 10,
-    borderRadius: 5,
-    marginBottom: 15,
-  },
-  statsText: {
-    textAlign: 'center',
-    fontSize: 14,
-    color: '#1976d2',
-  },
-  fileList: {
-    flex: 1,
-    marginVertical: 15,
-  },
-  fileItem: {
-    flexDirection: 'row',
-    backgroundColor: '#f8f9fa',
-    marginHorizontal: 20,
-    marginVertical: 5,
-    padding: 15,
-    borderRadius: 10,
-    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 20,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e9ecef',
+    elevation: 3,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#212529',
+    letterSpacing: 0.3,
+  },
+  adminButton: {
+    backgroundColor: '#6366f1',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 12,
+    elevation: 2,
+    shadowColor: '#6366f1',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
     shadowRadius: 4,
+  },
+  adminButtonText: {
+    color: '#ffffff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  statsContainer: {
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e9ecef',
+  },
+  statsText: {
+    fontSize: 16,
+    color: '#6c757d',
+    fontWeight: '500',
+  },
+  uploadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#4f46e5',
+    marginHorizontal: 20,
+    marginVertical: 18,
+    paddingVertical: 18,
+    paddingHorizontal: 24,
+    borderRadius: 18,
+    elevation: 6,
+    shadowColor: '#4f46e5',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+  },
+  uploadIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  uploadIconText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#4f46e5',
+  },
+  uploadButtonText: {
+    color: '#ffffff',
+    fontSize: 17,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  logoutButton: {
+    backgroundColor: '#ef4444',
+    marginHorizontal: 20,
+    marginVertical: 16,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    borderRadius: 14,
+    alignItems: 'center',
+    elevation: 4,
+    shadowColor: '#ef4444',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  logoutButtonText: {
+    color: '#ffffff',
+    fontSize: 17,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  fileList: {
+    flex: 1,
+  },
+  fileListContent: {
+    paddingTop: 8,
+    paddingBottom: 20,
+  },
+  fileItem: {
+    flexDirection: 'row',
+    backgroundColor: '#ffffff',
+    marginHorizontal: 16,
+    marginVertical: 6,
+    padding: 16,
+    borderRadius: 16,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
     elevation: 3,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
+    borderColor: '#f1f3f4',
   },
   fileImage: {
-    width: 50,
-    height: 50,
-    borderRadius: 8,
-    marginRight: 12,
+    width: 56,
+    height: 56,
+    borderRadius: 12,
+    marginRight: 16,
+    backgroundColor: '#f8f9fa',
   },
   fileInfo: {
     flex: 1,
@@ -652,17 +983,17 @@ const styles = StyleSheet.create({
   fileName: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#333',
-    marginBottom: 2,
+    color: '#1f2937',
+    marginBottom: 4,
   },
   fileSize: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: 13,
+    color: '#6b7280',
     marginBottom: 2,
   },
   fileDate: {
-    fontSize: 12,
-    color: '#888',
+    fontSize: 13,
+    color: '#9ca3af',
   },
   fileActions: {
     flexDirection: 'row',
@@ -676,11 +1007,27 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginLeft: 5,
   },
-  editButton: {
-    backgroundColor: '#007bff',
+  dropdownButton: {
+    backgroundColor: '#f3f4f6',
+    borderRadius: 12,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
   },
-  deleteButton: {
-    backgroundColor: '#dc3545',
+  dotsContainer: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: '#6b7280',
+    marginVertical: 1,
   },
   actionButtonText: {
     fontSize: 16,
@@ -689,16 +1036,20 @@ const styles = StyleSheet.create({
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 50,
+    paddingVertical: 80,
+    paddingHorizontal: 32,
   },
   emptyText: {
-    fontSize: 18,
-    color: '#666',
-    marginBottom: 5,
+    fontSize: 20,
+    color: '#374151',
+    marginBottom: 8,
+    fontWeight: '600',
   },
   emptySubText: {
-    fontSize: 14,
-    color: '#999',
+    fontSize: 16,
+    color: '#6b7280',
+    textAlign: 'center',
+    lineHeight: 24,
   },
   modalContainer: {
     flex: 1,
@@ -745,8 +1096,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   fullImage: {
-    width: width * 0.9,
-    height: width * 0.9,
+    width: '90%',
+    aspectRatio: 1,
     alignSelf: 'center',
     marginVertical: 20,
   },
@@ -761,6 +1112,72 @@ const styles = StyleSheet.create({
     color: '#666',
     textAlign: 'center',
     marginBottom: 2,
+  },
+  debugText: {
+    fontSize: 10,
+    color: '#999',
+    textAlign: 'center',
+    margin: 10,
+    padding: 5,
+    backgroundColor: '#f0f0f0',
+  },
+  // File Menu Modal Styles
+  menuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  menuContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    margin: 24,
+    maxWidth: 320,
+    width: '85%',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+  },
+  menuHeader: {
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f3f4',
+  },
+  menuTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1f2937',
+    marginBottom: 4,
+  },
+  menuSubtitle: {
+    fontSize: 14,
+    color: '#6b7280',
+  },
+  menuOption: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f3f4',
+  },
+  menuOptionText: {
+    fontSize: 17,
+    color: '#374151',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  deleteOption: {
+    backgroundColor: '#fef2f2',
+  },
+  deleteText: {
+    color: '#dc2626',
+  },
+  cancelOption: {
+    backgroundColor: '#f9fafb',
+    borderBottomWidth: 0,
   },
 });
 
